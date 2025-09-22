@@ -1,5 +1,18 @@
 # Key Overlay (Windows)
 
+![screenshot](./p1.png)
+
+<p align="left">
+  <a href="https://www.python.org/" target="_blank"><img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python" alt="Python"></a>
+  <a href="https://doc.qt.io/qtforpython-6/" target="_blank"><img src="https://img.shields.io/badge/PySide6-Qt%20for%20Python-41cd52?logo=qt" alt="PySide6"></a>
+  <img src="https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows" alt="Windows">
+  <img src="https://img.shields.io/badge/License-MIT-green" alt="License: MIT">
+  <img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs welcome">
+  <img src="https://img.shields.io/github/stars/yourname/key-overlay?style=social" alt="GitHub stars">
+  <img src="https://img.shields.io/github/forks/yourname/key-overlay?style=social" alt="GitHub forks">
+  <img src="https://img.shields.io/github/issues/yourname/key-overlay" alt="GitHub issues">
+</p>
+
 一个用于 Windows 的键盘按键显示与录制/回放的小工具，基于 PySide6。包含“显示面板”（透明 HUD）与“控制面板”（简约游戏风/微信风标题栏），支持置顶、拖拽、调整大小、录制保存与选择播放等功能。
 
 ## 功能特性
@@ -53,8 +66,18 @@ key-overlay/
   app.py               # 主程序
   requirements.txt     # 依赖
   README.md            # 说明文档
+  p1.png               # 示例截图
 ```
+
+## 贡献
+欢迎 Issue 和 PR！
+- 提交前请尽量复现、标注系统/环境与复现步骤。
+- UI/交互改进、性能优化、Bug 修复与国际化都非常欢迎。
 
 ## License
 MIT（可按需修改）。
+
+## 鸣谢
+- [PySide6 文档](https://doc.qt.io/qtforpython-6/)
+- [keyboard 库](https://pypi.org/project/keyboard/)
 

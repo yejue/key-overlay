@@ -19,6 +19,9 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QMessageBox,
     QToolButton,
+    QInputDialog,
+    QDialog,
+    QProgressBar,
 )
 
 try:
@@ -177,6 +180,7 @@ class KeyOverlayController:
         self._record_start_time = 0.0
         self._is_playing = False
         self._monitor_enabled = False
+        self._playback_stop = threading.Event()
 
     def start(self):
         # No-op: monitoring is controlled from UI
@@ -267,7 +271,7 @@ class KeyOverlayController:
             self.start_recording()
 
     # Playback controls
-    def play_file(self, path: Path):
+    def play_file(self, path: Path, times: int | None = 1, loop: bool = False, show_countdown: bool = True):
         if self._is_playing:
             return
         if not path.exists():
@@ -282,22 +286,53 @@ class KeyOverlayController:
             self._is_playing = True
             self.bridge.playback_state_changed.emit(True)
             try:
-                last_t = 0.0
+                # Pre-compute unique keys for emergency release on stop
+                unique_keys = set()
                 for e in events:
-                    t = float(e.get("t", 0.0))
-                    delay = max(0.0, t - last_t)
-                    if delay:
-                        time.sleep(delay)
                     name = e.get("name")
-                    etype = e.get("type")
-                    try:
-                        if etype == "down":
-                            keyboard.press(name)
-                        elif etype == "up":
-                            keyboard.release(name)
-                    except Exception:
-                        pass
-                    last_t = t
+                    if name:
+                        unique_keys.add(name)
+
+                cycle = 0
+                self._playback_stop.clear()
+                while not self._playback_stop.is_set():
+                    cycle += 1
+                    last_t = 0.0
+                    for e in events:
+                        if self._playback_stop.is_set():
+                            break
+                        t = float(e.get("t", 0.0))
+                        delay = max(0.0, t - last_t)
+                        if delay:
+                            # Sleep in small chunks so stop reacts quickly
+                            end_time = time.monotonic() + delay
+                            while not self._playback_stop.is_set() and time.monotonic() < end_time:
+                                time.sleep(min(0.01, end_time - time.monotonic()))
+                            if self._playback_stop.is_set():
+                                break
+                        name = e.get("name")
+                        etype = e.get("type")
+                        try:
+                            if etype == "down":
+                                keyboard.press(name)
+                            elif etype == "up":
+                                keyboard.release(name)
+                        except Exception:
+                            pass
+                        last_t = t
+
+                    if not loop:
+                        # If times is None, treat as once when loop=False
+                        if times is None:
+                            break
+                        if cycle >= max(1, int(times)):
+                            break
+                # On stop, attempt to release all keys
+                try:
+                    for k in unique_keys:
+                        keyboard.release(k)
+                except Exception:
+                    pass
             finally:
                 self._is_playing = False
                 self.bridge.playback_state_changed.emit(False)
@@ -305,7 +340,17 @@ class KeyOverlayController:
         threading.Thread(target=_runner, daemon=True).start()
 
     def play_last(self):
-        self.play_file(default_record_path())
+        self.play_file(default_record_path(), times=1, loop=False)
+
+    def play_last_n(self, times: int):
+        self.play_file(default_record_path(), times=max(1, int(times)), loop=False)
+
+    def loop_last(self):
+        self.play_file(default_record_path(), times=None, loop=True)
+
+    def stop_playback(self):
+        if self._is_playing:
+            self._playback_stop.set()
 
 
 class SystemTray:
@@ -339,6 +384,15 @@ class SystemTray:
         play_action = QAction("播放录制", menu)
         play_action.triggered.connect(self.controller.play_last)
 
+        play5_action = QAction("播放最近×5", menu)
+        play5_action.triggered.connect(lambda: self.controller.play_last_n(5))
+
+        loop_action = QAction("循环播放最近", menu)
+        loop_action.triggered.connect(self.controller.loop_last)
+
+        stop_playback_action = QAction("停止播放", menu)
+        stop_playback_action.triggered.connect(self.controller.stop_playback)
+
         toggle_action = QAction("显示/隐藏显示面板", menu)
         toggle_action.triggered.connect(self.toggle_overlay)
 
@@ -350,6 +404,9 @@ class SystemTray:
         menu.addAction(record_action)
         menu.addAction(stop_record_action)
         menu.addAction(play_action)
+        menu.addAction(play5_action)
+        menu.addAction(loop_action)
+        menu.addAction(stop_playback_action)
         menu.addSeparator()
         menu.addAction(toggle_action)
         menu.addSeparator()
@@ -400,6 +457,113 @@ def generate_tray_icon() -> QIcon:
 def default_record_path() -> Path:
     base = Path.home() / ".key_overlay"
     return base / "last_record.json"
+
+
+class CountdownDialog(QDialog):
+    def __init__(self, parent=None, countdown_seconds=3):
+        super().__init__(parent, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setModal(True)
+        self.countdown_seconds = countdown_seconds
+        self.remaining = countdown_seconds
+        
+        # Center on screen
+        screen = QGuiApplication.primaryScreen()
+        if screen:
+            geometry = screen.availableGeometry()
+            self.setGeometry(
+                geometry.center().x() - 150,
+                geometry.center().y() - 75,
+                300, 150
+            )
+        
+        # Layout
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+        
+        self.label = QLabel(f"播放开始倒计时", self)
+        self.label.setAlignment(Qt.AlignCenter)
+        self.label.setStyleSheet("""
+            QLabel {
+                color: rgba(255,255,255,240);
+                font-family: 'Segoe UI';
+                font-size: 16px;
+                font-weight: 600;
+            }
+        """)
+        
+        self.countdown_label = QLabel(str(self.remaining), self)
+        self.countdown_label.setAlignment(Qt.AlignCenter)
+        self.countdown_label.setStyleSheet("""
+            QLabel {
+                color: rgb(0, 200, 255);
+                font-family: 'Segoe UI';
+                font-size: 48px;
+                font-weight: 800;
+            }
+        """)
+        
+        self.progress = QProgressBar(self)
+        self.progress.setRange(0, countdown_seconds * 10)
+        self.progress.setValue(countdown_seconds * 10)
+        self.progress.setTextVisible(False)
+        self.progress.setStyleSheet("""
+            QProgressBar {
+                border: 2px solid rgba(255,255,255,60);
+                border-radius: 8px;
+                background-color: rgba(40,40,48,180);
+            }
+            QProgressBar::chunk {
+                background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgb(0, 200, 255), stop:1 rgb(0, 150, 200));
+                border-radius: 6px;
+            }
+        """)
+        
+        layout.addWidget(self.label)
+        layout.addWidget(self.countdown_label)
+        layout.addWidget(self.progress)
+        
+        # Background styling
+        self.setStyleSheet("""
+            QDialog {
+                background-color: rgba(20, 20, 24, 240);
+                border-radius: 12px;
+                border: 2px solid rgba(0, 200, 255, 120);
+            }
+        """)
+        
+        # Timer for countdown
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._update_countdown)
+        self.timer.start(100)  # Update every 100ms for smooth progress
+        
+        self._start_time = time.monotonic()
+    
+    def _update_countdown(self):
+        elapsed = time.monotonic() - self._start_time
+        remaining_time = max(0, self.countdown_seconds - elapsed)
+        
+        if remaining_time <= 0:
+            self.timer.stop()
+            self.accept()
+            return
+        
+        # Update countdown display
+        self.remaining = int(remaining_time) + 1
+        self.countdown_label.setText(str(self.remaining))
+        
+        # Update progress bar
+        progress_value = int((self.countdown_seconds - elapsed) * 10)
+        self.progress.setValue(max(0, progress_value))
+    
+    def keyPressEvent(self, event):
+        # Allow Escape to cancel
+        if event.key() == Qt.Key_Escape:
+            self.reject()
+        else:
+            super().keyPressEvent(event)
 
 
 class ControlWindow(QWidget):
@@ -474,6 +638,7 @@ class ControlWindow(QWidget):
         )
         hb.addWidget(self.btn_close)
 
+        # Single controls container with unified layout
         container = QWidget(frame)
         container.setFixedHeight(50)
         container.setObjectName("container")
@@ -481,13 +646,28 @@ class ControlWindow(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
 
+        # Main control buttons
         self.btn_monitor = QPushButton("开始监视", container)
         self.btn_record = QPushButton("开始录制", container)
-        self.btn_play_last = QPushButton("播放最近", container)
-        self.btn_play_file = QPushButton("选择播放", container)
         self.btn_show = QPushButton("显示面板", container)
+        
+        # Playback controls
+        self.btn_file_select = QPushButton("选择文件 ▼", container)
+        self.btn_play_options = QPushButton("播放模式 ▼", container)
+        self.btn_play_toggle = QPushButton("开始播放", container)
 
-        for b in (self.btn_monitor, self.btn_record, self.btn_play_last, self.btn_play_file, self.btn_show):
+        # Track current selections
+        self._selected_file = default_record_path()
+        self._selected_file_name = "最近录制"
+        self._play_mode = "once"  # "once", "n_times", "loop"
+        self._play_times = 1
+        self._is_playing = False
+
+        # Style all buttons
+        all_buttons = [self.btn_monitor, self.btn_record, self.btn_show, 
+                      self.btn_file_select, self.btn_play_options, self.btn_play_toggle]
+        
+        for b in all_buttons:
             b.setCursor(Qt.PointingHandCursor)
             b.setFixedSize(100, 50)
             b.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -499,7 +679,7 @@ class ControlWindow(QWidget):
                     border: 1px solid rgba(255,255,255, 40);
                     border-radius: 8px;
                     font-family: 'Segoe UI';
-                    font-size: 12px;
+                    font-size: 11px;
                     font-weight: 600;
                     padding: 0px 0px;
                 }
@@ -515,9 +695,11 @@ class ControlWindow(QWidget):
 
         layout.addWidget(self.btn_monitor)
         layout.addWidget(self.btn_record)
-        layout.addWidget(self.btn_play_last)
-        layout.addWidget(self.btn_play_file)
         layout.addWidget(self.btn_show)
+        layout.addStretch()
+        layout.addWidget(self.btn_file_select)
+        layout.addWidget(self.btn_play_options)
+        layout.addWidget(self.btn_play_toggle)
 
         frame_layout.addWidget(header)
         frame_layout.addWidget(container)
@@ -543,15 +725,17 @@ class ControlWindow(QWidget):
         self._recording = False
         self.btn_monitor.clicked.connect(self._toggle_monitor)
         self.btn_record.clicked.connect(self._toggle_record)
-        self.btn_play_last.clicked.connect(self.controller.play_last)
-        self.btn_play_file.clicked.connect(self._play_choose_file)
         self.btn_show.clicked.connect(self._toggle_overlay_visible)
+        self.btn_file_select.clicked.connect(self._show_file_menu)
+        self.btn_play_options.clicked.connect(self._show_play_options_menu)
+        self.btn_play_toggle.clicked.connect(self._toggle_playback)
         self.btn_pin.toggled.connect(self._apply_stay_on_top)
         self.btn_min.clicked.connect(self.showMinimized)
         self.btn_close.clicked.connect(self.close)
 
         # sync state from controller via bridge
         self.bridge.recording_state_changed.connect(self._on_record_state)
+        self.bridge.playback_state_changed.connect(self._on_playback_state)
 
         # auto-size window to content, minimize extra whitespace
         self.adjustSize()
@@ -673,7 +857,34 @@ class ControlWindow(QWidget):
         self._recording = is_rec
         self.btn_record.setText("停止录制" if is_rec else "开始录制")
 
-    def _play_choose_file(self):
+    def _on_playback_state(self, is_playing: bool):
+        self._is_playing = is_playing
+        self.btn_play_toggle.setText("停止播放" if is_playing else "开始播放")
+
+    def _show_file_menu(self):
+        menu = QMenu(self)
+        
+        # Recent recording option
+        recent_action = QAction("最近录制", menu)
+        recent_action.triggered.connect(lambda: self._select_file(default_record_path(), "最近录制"))
+        
+        # Choose file option
+        choose_action = QAction("选择文件...", menu)
+        choose_action.triggered.connect(self._choose_file)
+        
+        # Mark current selection
+        if self._selected_file == default_record_path():
+            recent_action.setCheckable(True)
+            recent_action.setChecked(True)
+        
+        menu.addAction(recent_action)
+        menu.addAction(choose_action)
+        
+        # Show menu below the button
+        button_pos = self.btn_file_select.mapToGlobal(QPoint(0, self.btn_file_select.height()))
+        menu.exec(button_pos)
+
+    def _choose_file(self):
         start_dir = str(default_record_path().parent)
         file_path, _ = QFileDialog.getOpenFileName(
             self,
@@ -682,7 +893,74 @@ class ControlWindow(QWidget):
             "JSON 文件 (*.json);;所有文件 (*.*)",
         )
         if file_path:
-            self.controller.play_file(Path(file_path))
+            file_name = Path(file_path).stem
+            self._select_file(Path(file_path), file_name)
+
+    def _select_file(self, file_path: Path, display_name: str):
+        self._selected_file = file_path
+        self._selected_file_name = display_name
+        # Update button text to show selection
+        self.btn_file_select.setText(f"{display_name[:8]}...")
+
+    def _show_play_options_menu(self):
+        menu = QMenu(self)
+        
+        once_action = QAction("播放一次", menu)
+        once_action.triggered.connect(lambda: self._set_play_mode("once"))
+        
+        n_times_action = QAction("播放N次", menu)
+        n_times_action.triggered.connect(self._set_play_n_times)
+        
+        loop_action = QAction("循环播放", menu)
+        loop_action.triggered.connect(lambda: self._set_play_mode("loop"))
+        
+        # Mark current selection
+        if self._play_mode == "once":
+            once_action.setCheckable(True)
+            once_action.setChecked(True)
+        elif self._play_mode == "n_times":
+            n_times_action.setCheckable(True)
+            n_times_action.setChecked(True)
+        elif self._play_mode == "loop":
+            loop_action.setCheckable(True)
+            loop_action.setChecked(True)
+        
+        menu.addAction(once_action)
+        menu.addAction(n_times_action)
+        menu.addAction(loop_action)
+        
+        # Show menu below the button
+        button_pos = self.btn_play_options.mapToGlobal(QPoint(0, self.btn_play_options.height()))
+        menu.exec(button_pos)
+
+    def _set_play_mode(self, mode: str):
+        self._play_mode = mode
+        if mode == "once":
+            self.btn_play_options.setText("播放一次")
+        elif mode == "loop":
+            self.btn_play_options.setText("循环播放")
+
+    def _set_play_n_times(self):
+        times, ok = QInputDialog.getInt(self, "播放若干次", "次数：", self._play_times, 1, 9999, 1)
+        if ok:
+            self._play_times = times
+            self._play_mode = "n_times"
+            self.btn_play_options.setText(f"播放{times}次")
+
+    def _toggle_playback(self):
+        if self._is_playing:
+            # Stop current playback
+            self.controller.stop_playback()
+        else:
+            # Start playback with countdown
+            countdown = CountdownDialog(self)
+            if countdown.exec() == QDialog.Accepted:
+                if self._play_mode == "once":
+                    self.controller.play_file(self._selected_file, times=1, loop=False, show_countdown=False)
+                elif self._play_mode == "n_times":
+                    self.controller.play_file(self._selected_file, times=self._play_times, loop=False, show_countdown=False)
+                elif self._play_mode == "loop":
+                    self.controller.play_file(self._selected_file, times=None, loop=True, show_countdown=False)
 
     # Using standard window frame; no custom drag handlers needed
 def main():
